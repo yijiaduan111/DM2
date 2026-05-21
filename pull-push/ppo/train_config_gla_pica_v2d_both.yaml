@@ -119,8 +119,10 @@ params:
         enabled:         true
         min_action_l2:   1.0
         min_stall_steps: 5
-        q_response_min:  0.005
-        contact_dist:    0.10
+        # Normalized by task_progress_denom; avoids rad/meter scale mismatch.
+        q_response_min_frac: 0.01
+        q_response_min:      0.005  # legacy raw-unit fallback
+        contact_dist:        0.10
       effort_penalty:
         type: action_l2
         weight_mode: adaptive

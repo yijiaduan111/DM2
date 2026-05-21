@@ -238,8 +238,12 @@ def _parse_aram_cfg(cfg):
             "enabled":          bool(rg.get("enabled", True)),
             "min_action_l2":    float(rg.get("min_action_l2", 1.0)),
             "min_stall_steps":  int(rg.get("min_stall_steps", 5)),
-            "q_response_min":   float(rg.get("q_response_min", 0.005)),
-            "contact_dist":     float(rg.get("contact_dist", 0.10)),
+            "q_response_min":      float(rg.get("q_response_min", 0.005)),
+            "q_response_min_frac": (
+                None if rg.get("q_response_min_frac", None) is None
+                else float(rg.get("q_response_min_frac"))
+            ),
+            "contact_dist":        float(rg.get("contact_dist", 0.10)),
         },
     }
 
@@ -642,15 +646,10 @@ class HandDragTask:
         self._phys_aux_gate_last = torch.zeros(self.num_envs, device=self.device)
 
         # ---- PICA v2c/v2d: causal-horizon ring buffers ----
-        # Holds the last `BUFLEN` samples of palm_to_handle_dist and target
-        # object joint position. Two regimes:
-        #   v2c only (aram/reconfig disabled):  BUFLEN = K+1   (cheap)
-        #   v2d (aram or reconfig enabled):     BUFLEN = 2K+1  (needed to
-        #                                       compute reconfig signals
-        #                                       over two consecutive K-windows)
-        # Indexing in either regime: ring[:, -1] = current step (t),
-        # ring[:, -1 - K] = step (t-K). Helper attribute `_idx_tK` resolves
-        # the correct offset uniformly.
+        # Keep aux-supervision history and v2d reward history separate. v2c
+        # aux targets are tied to the observation tick, while ARAM/reconfig
+        # rewards need reward-stage state. Sharing one ring silently changes
+        # v2c aux target timing when v2d code is merged in.
         self._aux_horizon = self._phys_aux_cfg.get("horizon", 5)
         self._aux_mode = self._phys_aux_cfg.get("mode", "current")
         self._aram_cfg = _parse_aram_cfg(aram)
@@ -658,6 +657,19 @@ class HandDragTask:
         self._aram_enabled = self._aram_cfg["enabled"]
         self._reconfig_enabled = self._reconfig_cfg["enabled"]
         K = max(1, int(self._aux_horizon))
+
+        # v2c physical auxiliary targets: observation-stage window [t-K, t].
+        self._aux_ring_buflen = K + 1
+        self._aux_idx_tK = 0
+        self._aux_palm_dist_hist = torch.zeros(
+            self.num_envs, self._aux_ring_buflen, device=self.device,
+        )
+        self._aux_q_obj_hist = torch.zeros(
+            self.num_envs, self._aux_ring_buflen, device=self.device,
+        )
+
+        # v2d reward terms: reward-stage history. Reconfig compares two
+        # adjacent K-windows, so it needs 2K+1 slots when enabled.
         need_long_hist = bool(self._aram_enabled or self._reconfig_enabled)
         BUFLEN = (2 * K + 1) if need_long_hist else (K + 1)
         self._aux_buflen = BUFLEN
@@ -1379,15 +1391,15 @@ class HandDragTask:
         self.prev_palm_to_handle_dist[env_ids] = reset_dist
         self.prev_actions_for_phys[env_ids] = 0.0
 
-        # PICA v2c: seed causal-horizon ring buffers with the post-reset
-        # palm distance and target-joint position. Filling all K+1 (or 2K+1)
-        # slots with the reset value keeps q_response_K / max_dist_K /
-        # detach_proxy_K at their natural reset values for the first K steps
-        # (response = 0, max_dist = reset_dist, detach_proxy depends on
-        # reset state).
+        # Seed both history rings with the post-reset palm distance and
+        # target-joint position. Filling all slots with the reset value keeps
+        # q_response_K / max_dist_K / detach_proxy_K at their natural reset
+        # values for the first K steps.
         post_reset_q_obj = self.dof_pos[
             env_ids, N_HAND_DOFS + self.target_joint_idx, 0,
         ]
+        self._aux_palm_dist_hist[env_ids] = reset_dist.unsqueeze(-1)
+        self._aux_q_obj_hist[env_ids] = post_reset_q_obj.unsqueeze(-1)
         self._palm_dist_hist[env_ids] = reset_dist.unsqueeze(-1)
         self._q_obj_hist[env_ids] = post_reset_q_obj.unsqueeze(-1)
 
@@ -1497,11 +1509,15 @@ class HandDragTask:
         if self._phys_aux_enabled:
             keys = self._phys_aux_cfg["target_keys"]
             cur_q_obj = arti_pos[:, self.target_joint_idx]
-            # PICA v2d: ring buffer is now updated at the TOP of compute_reward
-            # (so reward terms see the up-to-date ring); compute_observations
-            # only reads it. The slice indexing uses _idx_tK which works for
-            # both the v2c K+1 layout and the v2d 2K+1 layout.
-            idx_tK = self._idx_tK
+            # v2c aux targets use their own observation-stage ring so they
+            # stay aligned with the obs tick even when v2d reward code is on.
+            self._aux_palm_dist_hist = torch.roll(
+                self._aux_palm_dist_hist, shifts=-1, dims=1,
+            )
+            self._aux_palm_dist_hist[:, -1] = self.palm_to_handle_dist
+            self._aux_q_obj_hist = torch.roll(self._aux_q_obj_hist, shifts=-1, dims=1)
+            self._aux_q_obj_hist[:, -1] = cur_q_obj
+            idx_tK = self._aux_idx_tK
             cols = []
             for k in keys:
                 if k == "dq_obj":
@@ -1512,14 +1528,12 @@ class HandDragTask:
                     ).clamp(min=0.0).unsqueeze(-1)
                 elif k == "q_response_K":
                     col = (
-                        self._q_obj_hist[:, -1] - self._q_obj_hist[:, idx_tK]
+                        self._aux_q_obj_hist[:, -1] - self._aux_q_obj_hist[:, idx_tK]
                     ).unsqueeze(-1)
                 elif k == "max_dist_K":
-                    # max over the inclusive window [t-K..t] regardless of
-                    # ring length: take the last K+1 slots.
-                    col = self._palm_dist_hist[:, idx_tK:].max(dim=1).values.unsqueeze(-1)
+                    col = self._aux_palm_dist_hist[:, idx_tK:].max(dim=1).values.unsqueeze(-1)
                 elif k == "detach_proxy_K":
-                    max_d = self._palm_dist_hist[:, idx_tK:].max(dim=1).values
+                    max_d = self._aux_palm_dist_hist[:, idx_tK:].max(dim=1).values
                     col = (max_d > self.detach_dist).float().unsqueeze(-1)
                 elif k == "tracking_stress":
                     col = current_error.norm(dim=-1, keepdim=True)
@@ -1582,12 +1596,9 @@ class HandDragTask:
         self.palm_pos = palm_pos
         self.palm_to_handle_dist = dist
 
-        # ---- PICA v2c/v2d: roll the causal-horizon ring buffer here, BEFORE
-        # any v2d reward term reads it. compute_observations later in step()
-        # will see the same up-to-date ring -- the v2c aux targets are still
-        # aligned with the current obs because both ring values are computed
-        # from the same physics tick.
-        if self._phys_aux_enabled or self._aram_enabled or self._reconfig_enabled:
+        # ---- PICA v2d reward ring: update only for ARAM/reconfig terms. ----
+        # v2c physical auxiliary targets use a separate observation-stage ring.
+        if self._aram_enabled or self._reconfig_enabled:
             cur_q_obj_for_ring = self.dof_pos[
                 :, N_HAND_DOFS + self.target_joint_idx, 0,
             ]
@@ -1736,10 +1747,17 @@ class HandDragTask:
         if self._aram_enabled:
             acfg = self._aram_cfg
             rg = acfg["resistance_gate"]
-            # Stall counter: increments when q_response_K is below threshold,
-            # resets to zero otherwise. The gate fires only after the stall
-            # has persisted for at least min_stall_steps.
-            low_resp = q_response_K_t.abs() < rg["q_response_min"]
+            # Stall counter: increments when K-step object response is below
+            # threshold. Prefer a normalized progress threshold so revolute
+            # and prismatic joints use the same scale; keep raw-unit fallback
+            # for old configs that do not specify q_response_min_frac.
+            if rg.get("q_response_min_frac", None) is not None:
+                progress_response_K = q_response_K_t.abs() / max(
+                    1e-6, self.task_progress_denom,
+                )
+                low_resp = progress_response_K < float(rg["q_response_min_frac"])
+            else:
+                low_resp = q_response_K_t.abs() < rg["q_response_min"]
             self._stall_steps = torch.where(
                 low_resp,
                 self._stall_steps + 1,
