@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+export PROJECT_ROOT="/data/dyj/zts/pull-push"
+export ISAACGYM_ROOT="/data/dyj/zts/isaacgym"
+export CONDA_ENV_ROOT="/data/dyj/miniconda3/envs/cuda-kernel-eval"
+export PYBIN="${CONDA_ENV_ROOT}/bin/python"
+export PATH="${CONDA_ENV_ROOT}/bin:${PATH}"
+export PYTHONPATH="${ISAACGYM_ROOT}/python:${PROJECT_ROOT}/flash-linear-attention:${PYTHONPATH:-}"
+export LD_LIBRARY_PATH="${CONDA_ENV_ROOT}/lib:${LD_LIBRARY_PATH:-}"
+export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-/data/dyj/.cache/torch_extensions/py38_cu121}"

@@ -1,0 +1,187 @@
+# ============================================================
+# /data/dyj/zts GitHub core-code whitelist
+# Goal: upload only core code from:
+#   - pull-push
+#   - main_table_worktrees
+#   - preapproach_demo_code_20260518
+# Everything else is ignored by default.
+# ============================================================
+
+# Ignore everything first
+*
+
+# Keep root git metadata files
+!/.gitignore
+!/README.md
+!/LICENSE
+!/LICENSE.*
+
+# Whitelist the three core code trees
+!/pull-push/
+!/pull-push/**
+!/main_table_worktrees/
+!/main_table_worktrees/**
+!/preapproach_demo_code_20260518/
+!/preapproach_demo_code_20260518/**
+
+# ------------------------------------------------------------
+# Global noise / VCS / caches
+# ------------------------------------------------------------
+**/.git/
+**/.git/**
+**/__pycache__/
+**/__pycache__/**
+**/.pytest_cache/
+**/.pytest_cache/**
+**/.mypy_cache/
+**/.mypy_cache/**
+**/.ruff_cache/
+**/.ruff_cache/**
+**/.cache/
+**/.cache/**
+**/wandb/
+**/wandb/**
+**/.vscode/
+**/.vscode/**
+**/.idea/
+**/.idea/**
+
+# ------------------------------------------------------------
+# Experiment outputs / data / large assets
+# ------------------------------------------------------------
+**/assets/
+**/assets/**
+**/dataset/
+**/dataset/**
+**/datasets/
+**/datasets/**
+**/data/
+**/data/**
+**/clean_data/
+**/clean_data/**
+**/output/
+**/output/**
+**/outputs/
+**/outputs/**
+**/runs/
+**/runs/**
+**/checkpoints/
+**/checkpoints/**
+**/ckpt/
+**/ckpt/**
+**/logs/
+**/logs/**
+**/log/
+**/log/**
+**/train/
+**/train/**
+**/eval/
+**/eval/**
+**/result/
+**/result/**
+**/results/
+**/results/**
+**/reports/
+**/reports/**
+**/videos/
+**/videos/**
+**/video/
+**/video/**
+**/rollout_videos/
+**/rollout_videos/**
+
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+# Non-core docs / external vendored dependencies
+# ------------------------------------------------------------
+**/docs/
+**/docs/**
+**/reports/
+**/reports/**
+**/experiment_artifacts/
+**/experiment_artifacts/**
+**/flash-linear-attention/
+**/flash-linear-attention/**
+
+# Heavy/generated file types
+# ------------------------------------------------------------
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.bag
+*.mp4
+*.avi
+*.mov
+*.gif
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tiff
+*.webm
+*.obj
+*.stl
+*.glb
+*.gltf
+*.urdf.log
+*.log
+*.out
+*.err
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+*.rar
+*.bundle
+core
+core.*
+
+# ------------------------------------------------------------
+# Temporary / one-off scripts and scratch files inside code trees
+# Keep reusable scripts, ignore obvious scratch/patch/remote diagnostics.
+# ------------------------------------------------------------
+**/tmp_*
+**/*_tmp*
+**/temp_*
+**/*_temp*
+**/backup*
+**/backups/
+**/backups/**
+**/*backup*
+**/patch_*
+**/remote_*
+**/diagnose_*
+**/inspect_*
+**/debug_*
+**/check_*
+**/test_output*
+
+# ------------------------------------------------------------
+# Re-allow lightweight docs/config placeholders if they live in ignored dirs
+# ------------------------------------------------------------
+!**/README.md
+!**/.gitkeep
+!**/.gitignore
+
+# Extra code-only release ignores
+**/experiments/
+**/experiments/**
+**/archive/
+**/archive/**
+**/archived/
+**/archived/**
+**/docs/
+**/docs/**
+**/.codex
+**/codex.md
+**/*before_server_path_fix*
+**/loading
+**/saving
