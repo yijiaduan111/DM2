@@ -45,6 +45,7 @@ from scipy.spatial.transform import Rotation as Rot
 import sys
 import os
 import time
+import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from hand_object_gym import (
@@ -243,6 +244,7 @@ def _parse_aram_cfg(cfg):
                 None if rg.get("q_response_min_frac", None) is None
                 else float(rg.get("q_response_min_frac"))
             ),
+            "q_response_min_mode": str(rg.get("q_response_min_mode", "raw")).lower(),
             "contact_dist":        float(rg.get("contact_dist", 0.10)),
         },
     }
@@ -780,12 +782,57 @@ class HandDragTask:
         )
         self.task_goal_joint = traj_max
         self.task_progress_denom = max(1e-6, self.task_goal_joint - self.task_start_joint)
+        self.target_joint_type = self._infer_target_joint_type()
         print(
             "  [reset] ready-to-pull frame = "
             f"{self.drag_start_frame_idx}, start joint = {self.task_start_joint:.6f}, "
-            f"goal joint = {self.task_goal_joint:.6f}"
+            f"goal joint = {self.task_goal_joint:.6f}, "
+            f"joint type = {self.target_joint_type}"
         )
         self._build_rsi_frame_ids()
+
+
+    def _infer_target_joint_type(self) -> str:
+        """Infer target articulated joint type from the loaded GAPartNet URDF.
+
+        The trajectory-selected target_joint_idx indexes non-fixed object
+        joints. GAPartNet URDF joint order matches the articulated DOF order
+        used by Isaac Gym after fixed-joint collapse, so we map that index to
+        the corresponding non-fixed joint type. If anything is missing, fall
+        back to unknown and the ARAM gate will use the conservative raw
+        threshold.
+        """
+        try:
+            object_id = str(self.env.gapartnet_ids[0])
+            candidates = [
+                os.path.join(
+                    self.env.asset_root, self.env.gapartnet_root,
+                    object_id, "mobility.urdf",
+                ),
+                os.path.join(
+                    self.env.asset_root, self.env.gapartnet_root,
+                    object_id, "mobility_annotation_gapartnet.urdf",
+                ),
+            ]
+            urdf_path = next((path for path in candidates if os.path.exists(path)), None)
+            if urdf_path is None:
+                print(f"  [joint-type] URDF not found for object {object_id}; using unknown")
+                return "unknown"
+            joints = []
+            root = ET.parse(urdf_path).getroot()
+            for joint in root.findall("joint"):
+                joint_type = str(joint.attrib.get("type", "fixed")).lower()
+                if joint_type != "fixed":
+                    joints.append(joint_type)
+            if 0 <= int(self.target_joint_idx) < len(joints):
+                return joints[int(self.target_joint_idx)]
+            print(
+                "  [joint-type] target_joint_idx out of range: "
+                f"idx={self.target_joint_idx}, non_fixed_joints={joints}; using unknown"
+            )
+        except Exception as exc:
+            print(f"  [joint-type] failed to infer target joint type: {exc}; using unknown")
+        return "unknown"
 
     def _select_target_part_idx(self, handle_link_name: str):
         """Choose the articulated part whose handle should be tracked."""
@@ -1748,10 +1795,16 @@ class HandDragTask:
             acfg = self._aram_cfg
             rg = acfg["resistance_gate"]
             # Stall counter: increments when K-step object response is below
-            # threshold. Prefer a normalized progress threshold so revolute
-            # and prismatic joints use the same scale; keep raw-unit fallback
-            # for old configs that do not specify q_response_min_frac.
-            if rg.get("q_response_min_frac", None) is not None:
+            # threshold. Modes:
+            #   raw              -> use the legacy raw joint-unit threshold;
+            #   normalized       -> use progress-normalized response;
+            #   joint_type_aware -> raw for revolute, normalized for prismatic.
+            response_mode = str(rg.get("q_response_min_mode", "raw")).lower()
+            use_normalized_response = response_mode == "normalized" or (
+                response_mode == "joint_type_aware"
+                and getattr(self, "target_joint_type", "unknown") == "prismatic"
+            )
+            if use_normalized_response and rg.get("q_response_min_frac", None) is not None:
                 progress_response_K = q_response_K_t.abs() / max(
                     1e-6, self.task_progress_denom,
                 )

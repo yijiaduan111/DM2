@@ -83,7 +83,12 @@ def main():
     with open(traj_path) as f:
         trajectory = json.load(f)
 
-    include_handle_rot, include_prev_action, include_task_progress = infer_include_handle_rot(checkpoint, trajectory)
+    inferred_obs_flags = infer_include_handle_rot(checkpoint, trajectory)
+    if len(inferred_obs_flags) == 2:
+        include_handle_rot, include_prev_action = inferred_obs_flags
+        include_task_progress = False
+    else:
+        include_handle_rot, include_prev_action, include_task_progress = inferred_obs_flags
     is_gla = _is_gla_checkpoint(checkpoint['model'])
     aux_keys = any(k.startswith('a2c_network.aux_head.') for k in checkpoint['model'])
     if args.phys_aux is None:
@@ -125,7 +130,14 @@ def main():
     env = HandObjectGym(cfg)
     env.get_gapartnet_anno()
     env.run_steps(50, refresh_obs=True)
-    handle = resolve_handle_link_name(env, args.handle_link_name)
+    handle = resolve_handle_link_name(
+        env,
+        args.handle_link_name,
+        target_joint_idx=args.target_joint_idx,
+        trajectory_path=str(traj_path),
+        env_config=cfg,
+        object_id=args.object_id,
+    )
     damp_after, fric_after = apply_ood_dynamics_overrides(env, damping_scale=args.damping, friction_scale=1.0)
 
     task = HandDragTask(
@@ -137,7 +149,6 @@ def main():
         is_eval_mode=True,
         epoch_log_path=None,
         include_prev_action_in_history=include_prev_action,
-        include_task_progress_obs=include_task_progress,
         physical_auxiliary=eval_phys_aux_cfg,
     )
     task.max_episode_length = int(args.max_steps)
@@ -147,13 +158,26 @@ def main():
         actor = GLAActor(checkpoint, task.device, history_length=task.history_len, stochastic=(args.mode == 'stoch'), pool=args.gla_pool, phys_aux=eval_phys_aux)
     else:
         actor = RLGamesActor(checkpoint, task.device, stochastic=(args.mode == 'stoch'))
+        # Some v2c no-GLA checkpoints kept aux-target normalization stats at the tail
+        # even though the actor input itself is the shorter base observation.
+        if hasattr(actor, 'running_mean') and actor.running_mean.shape[-1] > actor.obs_dim:
+            actor.running_mean = actor.running_mean[:actor.obs_dim]
+            actor.running_var = actor.running_var[:actor.obs_dim]
 
     rows = []
     obs = task.reset()
     frame_i = 0
-    try:
+
+    def save_frame():
+        nonlocal frame_i
+        # IsaacGym headless cameras can otherwise keep returning the first image.
+        env.gym.fetch_results(env.sim, True)
+        env.gym.step_graphics(env.sim)
+        env.gym.render_all_camera_sensors(env.sim)
         env.save_camera_image(str(frame_dir / f'frame_{frame_i:04d}.png'), cam_idx=args.cam_idx)
         frame_i += 1
+    try:
+        save_frame()
         for step in range(args.max_steps):
             if step < args.detach_arm_delay:
                 task.detach_armed_buf.zero_()
@@ -163,8 +187,7 @@ def main():
             row = metric_row(task, 0, step, reward, done)
             rows.append(row)
             if step % args.frame_stride == 0 or bool(done[0].item()):
-                env.save_camera_image(str(frame_dir / f'frame_{frame_i:04d}.png'), cam_idx=args.cam_idx)
-                frame_i += 1
+                save_frame()
             if bool(done[0].item()):
                 break
         summary = summarize_episode(rows)
