@@ -151,3 +151,8 @@ loading
 saving
 scripts/pica_server/local/archive/
 scripts/pica_server/local/archive/**
+
+
+# Keep reusable experiment launchers.
+!scripts/experiments/
+!scripts/experiments/**

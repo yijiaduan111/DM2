@@ -12,6 +12,7 @@
 # Keep root git metadata files
 !/.gitignore
 !/README.md
+!/PROJECT_LAYOUT.md
 !/LICENSE
 !/LICENSE.*
 
@@ -20,6 +21,8 @@
 !/pull-push/**
 !/main_table_worktrees/
 !/main_table_worktrees/**
+!/GAPartNet/
+!/GAPartNet/**
 
 # ------------------------------------------------------------
 # Global noise / VCS / caches
@@ -182,3 +185,33 @@ core.*
 **/*before_server_path_fix*
 **/loading
 **/saving
+
+
+# GAPartNet: keep algorithm code and project skeleton, ignore heavy artifacts.
+!/GAPartNet/
+!/GAPartNet/**
+/GAPartNet/.git/
+/GAPartNet/.git/**
+/GAPartNet/**/__pycache__/
+/GAPartNet/**/__pycache__/**
+/GAPartNet/**/output/*
+/GAPartNet/**/outputs/*
+/GAPartNet/**/runs/*
+/GAPartNet/**/logs/*
+/GAPartNet/**/ckpt/*
+/GAPartNet/**/checkpoints/*
+/GAPartNet/**/assets/*
+/GAPartNet/example_assets/*
+/GAPartNet/gapartnet/data/*
+/GAPartNet/pointnet2_ops_lib/build/*
+/GAPartNet/**/*.so
+/GAPartNet/**/*.egg-info/
+/GAPartNet/**/*.egg-info/**
+/GAPartNet/demo.ipynb
+!/GAPartNet/**/.gitkeep
+!/GAPartNet/**/README.md
+!/GAPartNet/**/.gitignore
+
+# Keep lightweight reusable experiment launchers.
+!/pull-push/scripts/experiments/
+!/pull-push/scripts/experiments/**
