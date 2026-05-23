@@ -3,7 +3,6 @@
 # Goal: upload only core code from:
 #   - pull-push
 #   - main_table_worktrees
-#   - preapproach_demo_code_20260518
 # Everything else is ignored by default.
 # ============================================================
 
@@ -16,13 +15,11 @@
 !/LICENSE
 !/LICENSE.*
 
-# Whitelist the three core code trees
+# Whitelist the two core code trees
 !/pull-push/
 !/pull-push/**
 !/main_table_worktrees/
 !/main_table_worktrees/**
-!/preapproach_demo_code_20260518/
-!/preapproach_demo_code_20260518/**
 
 # ------------------------------------------------------------
 # Global noise / VCS / caches

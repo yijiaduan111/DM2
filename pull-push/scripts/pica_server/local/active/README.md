@@ -24,3 +24,13 @@ export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTORCH_JIT=0 OMP_NUM_THREADS=1 M
 - `output/pica_single_7310_rerun_eval`: 7310 eval outputs.
 - `output/pica_single_45261_handle7_clean_eval`: 45261 handle_7 eval outputs.
 - `output/pica_rerun_27044_41529_eval`: 27044/41529 rerun eval outputs.
+
+## Optional Pre-Approach Demo Segment
+
+`record_policy_rollout.py` can optionally prepend the dataset approach/grasp segment before the normal PPO drag rollout:
+
+```bash
+python scripts/pica_server/local/active/record_policy_rollout.py   --use_preapproach   --object_id 45936   --trajectory /path/to/trajectory.json   --checkpoint /path/to/checkpoint_or_nn_dir   --checkpoint-kind latest   --out_dir output/demo_preapproach/45936_det
+```
+
+This is visualization-only. The pre-approach segment replays trajectory frames before the first `phase == drag` frame, then resets to the original PPO drag-start state and runs the unchanged policy. It does not affect training, unified evaluation, rewards, checkpoints, or reported metrics.

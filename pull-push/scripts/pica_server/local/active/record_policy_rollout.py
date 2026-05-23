@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import yaml
+import numpy as np
 
 # Isaac Gym before torch
 from isaacgym import gymapi, gymtorch  # noqa: F401
@@ -36,7 +37,10 @@ from scripts.evaluate_ppo_baseline import (  # noqa: E402
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--object_id', required=True)
-    p.add_argument('--trajectory', default=None)
+    p.add_argument('--trajectory', default=None, help='Legacy alias for --ppo_trajectory and --pre_trajectory')
+    p.add_argument('--use_preapproach', action='store_true', help='Replay dataset approach frames before the PPO drag rollout for demo videos only')
+    p.add_argument('--pre_trajectory', default=None, help='Trajectory used for the pre-approach replay segment')
+    p.add_argument('--ppo_trajectory', default=None, help='Trajectory used to define the unchanged PPO drag-start state')
     p.add_argument('--checkpoint', required=True)
     p.add_argument('--checkpoint-kind', default='latest', choices=['latest','best'])
     p.add_argument('--out_dir', required=True)
@@ -44,6 +48,10 @@ def parse_args():
     p.add_argument('--damping', type=float, default=1.0)
     p.add_argument('--max_steps', type=int, default=300)
     p.add_argument('--frame_stride', type=int, default=5)
+    p.add_argument('--pre_frame_stride', type=int, default=3)
+    p.add_argument('--pre_steps_per_frame', type=int, default=2)
+    p.add_argument('--transition_steps', type=int, default=30)
+    p.add_argument('--transition_frame_stride', type=int, default=3)
     p.add_argument('--cam_idx', type=int, default=0)
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--config', default='hand_config.yaml')
@@ -57,6 +65,45 @@ def parse_args():
     sys.argv = [sys.argv[0]] + gym_args
     return args
 
+
+
+
+def default_trajectory(object_id):
+    return PROJECT_ROOT / 'output' / 'hand_drag' / str(object_id) / 'trajectory.json'
+
+
+def resolve_pre_trajectory(args):
+    path = args.pre_trajectory or args.trajectory
+    return Path(path) if path else default_trajectory(args.object_id)
+
+
+def resolve_ppo_trajectory(args):
+    path = args.ppo_trajectory or args.trajectory
+    return Path(path) if path else default_trajectory(args.object_id)
+
+
+def first_drag_index(trajectory):
+    for idx, frame in enumerate(trajectory):
+        if frame.get('phase') == 'drag':
+            return idx
+    return min(40, max(0, len(trajectory) - 1))
+
+
+def hand_targets_from_frame(frame):
+    return np.asarray(
+        frame['virtual_xyz'] + frame['wrist_rpy'] + frame['finger_dofs'],
+        dtype=np.float32,
+    )
+
+
+def write_csv(path, rows):
+    if not rows:
+        return
+    with open(path, 'w') as f:
+        keys = list(rows[0].keys())
+        f.write(','.join(keys) + '\n')
+        for row in rows:
+            f.write(','.join(str(row[k]) for k in keys) + '\n')
 
 def load_cfg(args):
     with open(PROJECT_ROOT / args.config) as f:
@@ -79,9 +126,14 @@ def main():
 
     ckpt_path = resolve_checkpoint_path(args.checkpoint, args.checkpoint_kind)
     checkpoint = torch.load(ckpt_path, map_location='cpu')
-    traj_path = Path(args.trajectory) if args.trajectory else PROJECT_ROOT / 'output' / 'hand_drag' / args.object_id / 'trajectory.json'
+    traj_path = resolve_ppo_trajectory(args)
+    pre_traj_path = resolve_pre_trajectory(args)
     with open(traj_path) as f:
         trajectory = json.load(f)
+    pre_trajectory = None
+    if args.use_preapproach:
+        with open(pre_traj_path) as f:
+            pre_trajectory = json.load(f)
 
     inferred_obs_flags = infer_include_handle_rot(checkpoint, trajectory)
     if len(inferred_obs_flags) == 2:
@@ -166,18 +218,68 @@ def main():
 
     rows = []
     obs = task.reset()
+    ppo_start_hand = task.ready_grasp_hand.detach().cpu().numpy().astype(np.float32)
     frame_i = 0
 
-    def save_frame():
+    def save_frame(tag=None):
         nonlocal frame_i
         # IsaacGym headless cameras can otherwise keep returning the first image.
         env.gym.fetch_results(env.sim, True)
         env.gym.step_graphics(env.sim)
         env.gym.render_all_camera_sensors(env.sim)
-        env.save_camera_image(str(frame_dir / f'frame_{frame_i:04d}.png'), cam_idx=args.cam_idx)
+        suffix = f'_{tag}' if tag else ''
+        env.save_camera_image(str(frame_dir / f'frame_{frame_i:04d}{suffix}.png'), cam_idx=args.cam_idx)
         frame_i += 1
+
+    def play_preapproach():
+        nonlocal frame_i
+        if not args.use_preapproach:
+            return []
+        pre_drag_idx = first_drag_index(pre_trajectory)
+        pre_end = max(0, pre_drag_idx)
+        pre_rows = []
+        current = None
+        print(
+            f"  [pre] playing approach frames [0, {pre_end}); "
+            f"pre_traj={pre_traj_path} ppo_traj={traj_path}"
+        )
+        for traj_idx, frame in enumerate(pre_trajectory[:pre_end]):
+            current = hand_targets_from_frame(frame)
+            env.set_hand_dof_targets(current)
+            env.run_steps(int(args.pre_steps_per_frame), refresh_obs=True)
+            if traj_idx % args.pre_frame_stride == 0 or traj_idx == pre_end - 1:
+                save_frame('pre')
+            pre_rows.append({
+                'segment': 'pre',
+                'trajectory_idx': int(traj_idx),
+                'phase': frame.get('phase', ''),
+                'step': int(frame.get('step', traj_idx)),
+            })
+        if current is None:
+            current = env.get_current_hand_targets().astype(np.float32)
+        n_transition = max(0, int(args.transition_steps))
+        if n_transition > 0:
+            print(f"  [pre] interpolating to PPO drag-start in {n_transition} steps")
+        for step in range(n_transition):
+            frac = float(step + 1) / float(n_transition)
+            targets = ((1.0 - frac) * current + frac * ppo_start_hand).astype(np.float32)
+            env.set_hand_dof_targets(targets)
+            env.run_steps(int(args.pre_steps_per_frame), refresh_obs=True)
+            if step % args.transition_frame_stride == 0 or step == n_transition - 1:
+                save_frame('to_ppo_start')
+            pre_rows.append({
+                'segment': 'transition_to_ppo_start',
+                'trajectory_idx': '',
+                'phase': 'transition',
+                'step': int(step),
+            })
+        return pre_rows
+
     try:
-        save_frame()
+        pre_rows = play_preapproach()
+        if args.use_preapproach:
+            obs = task.reset()
+        save_frame('ppo_start' if args.use_preapproach else None)
         for step in range(args.max_steps):
             if step < args.detach_arm_delay:
                 task.detach_armed_buf.zero_()
@@ -187,13 +289,15 @@ def main():
             row = metric_row(task, 0, step, reward, done)
             rows.append(row)
             if step % args.frame_stride == 0 or bool(done[0].item()):
-                save_frame()
+                save_frame('ppo' if args.use_preapproach else None)
             if bool(done[0].item()):
                 break
         summary = summarize_episode(rows)
         summary.update({
             'object_id': str(args.object_id),
             'trajectory': str(traj_path),
+            'preapproach_enabled': bool(args.use_preapproach),
+            'pre_trajectory': str(pre_traj_path) if args.use_preapproach else None,
             'checkpoint': str(ckpt_path),
             'mode': args.mode,
             'damping': args.damping,
@@ -205,11 +309,11 @@ def main():
         })
         with open(out_dir / 'summary.json', 'w') as f:
             json.dump(summary, f, indent=2)
-        with open(out_dir / 'metrics.csv', 'w') as f:
-            keys=list(rows[0].keys())
-            f.write(','.join(keys)+'\n')
-            for r in rows:
-                f.write(','.join(str(r[k]) for k in keys)+'\n')
+        write_csv(out_dir / 'metrics.csv', rows)
+        if args.use_preapproach:
+            with open(out_dir / 'preapproach_trace.json', 'w') as f:
+                json.dump(pre_rows, f, indent=2)
+            write_csv(out_dir / 'preapproach_trace.csv', pre_rows)
         print(json.dumps(summary, indent=2))
 
     finally:
