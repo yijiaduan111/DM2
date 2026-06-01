@@ -300,7 +300,7 @@ def main():
     # train config, in which case we honor the YAML's history-token choice.
     network_name = train_config["params"]["network"].get("name", "actor_critic")
     include_handle_rot = True
-    include_prev_action_in_history = (network_name == "gla_actor_critic")
+    include_prev_action_in_history = network_name in ("gla_actor_critic", "temporal_actor_critic")
     history_obs_cfg = ppo_cfg.get("history_observation", {}) or {}
     include_history_obs = bool(history_obs_cfg.get("enabled", True))
     if network_name == "gla_actor_critic" and not include_history_obs:
@@ -449,6 +449,10 @@ def main():
         from ppo.gla_a2c_network import register_gla_network
         register_gla_network()
         print("  [network] registered gla_actor_critic builder")
+    elif network_name == "temporal_actor_critic":
+        from ppo.temporal_a2c_network import register_temporal_network
+        register_temporal_network()
+        print("  [network] registered temporal_actor_critic builder")
     elif network_name == "pica_mlp_actor_critic":
         from ppo.pica_mlp_a2c_network import register_pica_mlp_network
         register_pica_mlp_network()

@@ -41,11 +41,16 @@ if _FLA_ROOT not in sys.path:
     sys.path.insert(0, _FLA_ROOT)
 
 
+def _is_temporal_checkpoint(model_state):
+    return any(k.startswith("a2c_network.temporal_encoder") for k in model_state)
+
+
 def _is_gla_checkpoint(model_state):
-    return any(
-        k.startswith("a2c_network.gla.") or k.startswith("a2c_network.token_proj")
-        for k in model_state
-    )
+    return any(k.startswith("a2c_network.gla.") for k in model_state)
+
+
+def _is_sequence_checkpoint(model_state):
+    return _is_gla_checkpoint(model_state) or _is_temporal_checkpoint(model_state)
 
 
 def _load_running_mean_std(checkpoint, obs_dim):
@@ -312,6 +317,159 @@ class GLAActor(nn.Module):
         return mu
 
 
+class TemporalActor(nn.Module):
+    """Actor matching temporal_a2c_network.py GRU/Transformer baselines."""
+
+    def __init__(self, checkpoint, device, history_length=16, stochastic=False):
+        super().__init__()
+        from ppo.temporal_a2c_network import TemporalA2CBuilder
+
+        model = checkpoint["model"]
+        base_dim = int(model["a2c_network.actor_mlp.0.weight"].shape[1])
+        h0 = int(model["a2c_network.actor_mlp.0.weight"].shape[0])
+        h1 = int(model["a2c_network.actor_mlp.2.weight"].shape[0])
+        h2 = int(model["a2c_network.actor_mlp.4.weight"].shape[0])
+        token_dim = int(model["a2c_network.token_proj.weight"].shape[1])
+        temporal_hidden = int(model["a2c_network.token_proj.weight"].shape[0])
+        act_dim = int(model["a2c_network.mu.weight"].shape[0])
+
+        if "a2c_network.pos_embed" in model:
+            encoder = "transformer"
+            num_layers = 1 + max(
+                int(k.split(".")[3])
+                for k in model
+                if k.startswith("a2c_network.temporal_encoder.layers.")
+            )
+            ffn_hidden = int(
+                model["a2c_network.temporal_encoder.layers.0.linear1.weight"].shape[0]
+            )
+            num_heads = 4
+        else:
+            encoder = "gru"
+            layer_ids = []
+            for k in model:
+                if k.startswith("a2c_network.temporal_encoder.weight_ih_l"):
+                    layer_ids.append(int(k.rsplit("l", 1)[1]))
+            num_layers = max(layer_ids) + 1 if layer_ids else 1
+            ffn_hidden = temporal_hidden * 4
+            num_heads = 4
+
+        aux_keys_present = any(k.startswith("a2c_network.aux_head.") for k in model)
+        aux_enabled = bool(aux_keys_present)
+        if aux_enabled and "a2c_network.aux_head.2.weight" in model:
+            aux_pred_dim = int(model["a2c_network.aux_head.2.weight"].shape[0])
+            aux_hidden = int(model["a2c_network.aux_head.2.weight"].shape[1])
+        else:
+            aux_pred_dim = 0
+            aux_hidden = 64
+        aux_target_dim = aux_pred_dim if aux_enabled else 0
+
+        self.base_dim = base_dim
+        self.history_length = int(history_length)
+        self.token_dim = token_dim
+        self.aux_enabled = aux_enabled
+        self.aux_pred_dim = aux_pred_dim
+        self.aux_target_dim = aux_target_dim
+        self.aux_hidden = aux_hidden
+        self.encoder = encoder
+        self.obs_dim = base_dim + self.history_length * token_dim + aux_target_dim
+        self.stochastic = bool(stochastic)
+
+        params = {
+            "separate": False,
+            "mlp": {
+                "units": [h0, h1, h2],
+                "activation": "elu",
+                "initializer": {"name": "default"},
+                "d2rl": False,
+                "norm_only_first_layer": False,
+            },
+            "space": {"continuous": {
+                "mu_activation": "None",
+                "sigma_activation": "None",
+                "mu_init": {"name": "default"},
+                "sigma_init": {"name": "const_initializer", "val": -2.0},
+                "fixed_sigma": True,
+            }},
+            "temporal": {
+                "encoder": encoder,
+                "history_length": self.history_length,
+                "token_dim": self.token_dim,
+                "hidden_size": temporal_hidden,
+                "num_layers": num_layers,
+                "num_heads": num_heads,
+                "ffn_hidden": ffn_hidden,
+                "dropout": 0.0,
+                "pool": "last",
+            },
+            "phys_aux": {
+                "enabled": bool(aux_enabled),
+                "pred_dim": int(aux_pred_dim),
+                "target_dim": int(aux_target_dim),
+                "hidden_size": int(aux_hidden),
+            },
+            "value_activation": "None",
+            "normalization": None,
+        }
+
+        builder = TemporalA2CBuilder()
+        builder.load(params)
+        self.net = builder.build(
+            "a2c",
+            actions_num=act_dim,
+            input_shape=(self.obs_dim,),
+            value_size=1,
+            num_seqs=1,
+        )
+
+        ckpt_state = {
+            k[len("a2c_network."):]: v
+            for k, v in model.items()
+            if k.startswith("a2c_network.")
+        }
+        missing, unexpected = self.net.load_state_dict(ckpt_state, strict=False)
+        if missing:
+            print(f"  [temporal-actor] missing keys: {missing[:5]}{'...' if len(missing) > 5 else ''}")
+        if unexpected:
+            print(f"  [temporal-actor] unexpected keys: {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
+
+        sigma_param = model.get("a2c_network.sigma")
+        if sigma_param is None:
+            self.register_buffer("logstd", torch.full((act_dim,), -2.0))
+        else:
+            self.register_buffer("logstd", sigma_param.float().view(-1))
+
+        running_mean, running_var = _load_running_mean_std(checkpoint, self.obs_dim)
+        self.register_buffer("running_mean", running_mean)
+        self.register_buffer("running_var", running_var)
+
+        self.to(device)
+        self.eval()
+
+    @torch.no_grad()
+    def forward(self, obs):
+        if obs.shape[-1] != self.obs_dim:
+            current_history_aux = self.history_length * self.token_dim + self.aux_target_dim
+            current_base_dim = obs.shape[-1] - current_history_aux
+            pad_dim = self.base_dim - current_base_dim
+            if 0 < pad_dim <= 8 and current_base_dim > 0:
+                base = obs[..., :current_base_dim]
+                tail = obs[..., current_base_dim:]
+                pad = torch.zeros(*obs.shape[:-1], pad_dim, device=obs.device, dtype=obs.dtype)
+                obs = torch.cat([base, pad, tail], dim=-1)
+            if obs.shape[-1] != self.obs_dim:
+                raise ValueError(
+                    f"Observation dim {obs.shape[-1]} != checkpoint obs_dim {self.obs_dim}"
+                )
+        obs_norm = (obs - self.running_mean) / torch.sqrt(self.running_var + 1e-5)
+        obs_norm = torch.clamp(obs_norm, -5.0, 5.0)
+        mu, sigma, _value, _states = self.net({"obs": obs_norm, "is_train": False})
+        if self.stochastic:
+            std = torch.exp(self.logstd).expand_as(mu)
+            mu = mu + torch.randn_like(mu) * std
+        return mu
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate a HandDrag PPO checkpoint")
     parser.add_argument("--config", default="hand_config.yaml")
@@ -461,7 +619,7 @@ def infer_include_handle_rot(checkpoint, trajectory):
         raise ValueError("Empty trajectory")
     state = checkpoint["model"]
     input_dim = int(state["a2c_network.actor_mlp.0.weight"].shape[1])
-    is_gla_ckpt = _is_gla_checkpoint(state)
+    is_gla_ckpt = _is_sequence_checkpoint(state)
 
     n_arti_dofs = len(trajectory[0]["joint_positions"])
     palm_extra = 3 + 1
@@ -655,7 +813,9 @@ def main():
     include_handle_rot, include_prev_action_in_history = infer_include_handle_rot(
         checkpoint, trajectory,
     )
+    is_temporal = _is_temporal_checkpoint(checkpoint["model"])
     is_gla = _is_gla_checkpoint(checkpoint["model"])
+    is_sequence = is_gla or is_temporal
 
     # ---- PICA v2b: decide whether the env should append aux targets to obs.
     # Auto-detect from the checkpoint's state_dict (presence of aux_head.*)
@@ -668,7 +828,7 @@ def main():
         eval_phys_aux = bool(aux_keys_in_ckpt)
     else:
         eval_phys_aux = bool(int(args.phys_aux))
-    if eval_phys_aux and not is_gla:
+    if eval_phys_aux and not is_sequence:
         print(
             "  [warn] --phys_aux requested but checkpoint is flat-MLP "
             "(no aux head pathway). Disabling aux targets in env."
@@ -768,7 +928,15 @@ def main():
         print(f"  [override] n_settle_substeps = {task.n_settle_substeps}")
     if args.detach_arm_delay > 0:
         print(f"  [override] detach_arm_delay = {args.detach_arm_delay} steps")
-    if is_gla:
+    if is_temporal:
+        actor = TemporalActor(
+            checkpoint,
+            task.device,
+            history_length=task.history_len,
+            stochastic=args.stochastic,
+        )
+        print(f"  [actor] type = Temporal-{actor.encoder}")
+    elif is_gla:
         actor = GLAActor(
             checkpoint,
             task.device,
@@ -786,11 +954,11 @@ def main():
     # ---- PICA v2b: diagnostic startup banner for shape / aux alignment ----
     # Helps catch the train/eval obs-dim mismatch class of bugs at a glance.
     ckpt_obs_dim_inferred = (
-        actor.obs_dim if is_gla else getattr(actor, "obs_dim", None)
+        actor.obs_dim if is_sequence else getattr(actor, "obs_dim", None)
     )
-    aux_size = getattr(actor, "aux_target_dim", 0) if is_gla else 0
+    aux_size = getattr(actor, "aux_target_dim", 0) if is_sequence else 0
     actor_main_obs_dim = (
-        getattr(actor, "base_dim", None) if is_gla
+        getattr(actor, "base_dim", None) if is_sequence
         else getattr(actor, "obs_dim", None)
     )
     print()
@@ -803,9 +971,9 @@ def main():
     print(f"    env obs_dim               = {task.obs_dim}")
     print(f"    aux_size (sliced off)     = {aux_size}")
     print(f"    actor_main_obs_dim        = {actor_main_obs_dim}")
-    print(f"    network type              = {'GLA' if is_gla else 'flat-MLP'}")
+    print(f"    network type              = {'Temporal' if is_temporal else ('GLA' if is_gla else 'flat-MLP')}")
     print(f"    actor / algo type         = {type(actor).__name__}")
-    if is_gla and ckpt_obs_dim_inferred != task.obs_dim:
+    if is_sequence and ckpt_obs_dim_inferred != task.obs_dim:
         print(
             f"  [eval-diagnostic][WARN] obs_dim mismatch: ckpt expects "
             f"{ckpt_obs_dim_inferred} but env emits {task.obs_dim}. "
