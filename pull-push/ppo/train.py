@@ -300,7 +300,7 @@ def main():
     # train config, in which case we honor the YAML's history-token choice.
     network_name = train_config["params"]["network"].get("name", "actor_critic")
     include_handle_rot = True
-    include_prev_action_in_history = (network_name == "gla_actor_critic")
+    include_prev_action_in_history = network_name in ("gla_actor_critic", "temporal_actor_critic")
     if checkpoint_path is not None:
         include_handle_rot, include_prev_action_in_history = infer_obs_layout(
             checkpoint_path, traj_path
@@ -446,6 +446,10 @@ def main():
         from ppo.gla_a2c_network import register_gla_network
         register_gla_network()
         print("  [network] registered gla_actor_critic builder")
+    elif network_name == "temporal_actor_critic":
+        from ppo.temporal_a2c_network import register_temporal_network
+        register_temporal_network()
+        print("  [network] registered temporal_actor_critic builder")
 
     # ── Launch rl_games Runner ──
     runner = Runner()

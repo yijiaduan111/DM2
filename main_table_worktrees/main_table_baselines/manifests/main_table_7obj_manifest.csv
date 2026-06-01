@@ -1,0 +1,8 @@
+sample_id,object_id,handle,trajectory,asset,enabled
+45936_handle_1,45936,handle_1,/data/dyj/zts/clean_data/v20260520/data520/45936/handle_1/trajectory.json,/data/dyj/zts/pull-push/assets/gapartnet_example/45936,1
+7310_handle_1,7310,handle_1,/data/dyj/zts/clean_data/v20260520/data520/7310/handle_1/trajectory.json,/data/dyj/zts/pull-push/assets/gapartnet_example/7310,1
+45661_handle_3,45661,handle_3,/data/dyj/zts/clean_data/v20260520/data520/45661/handle_3/trajectory.json,/data/dyj/zts/pull-push/assets/gapartnet_example/45661,1
+45261_handle_7,45261,handle_7,/data/dyj/zts/clean_data/v20260520/data520/45261/handle_7/trajectory.json,/data/dyj/zts/pull-push/assets/gapartnet_example/45261,1
+46440_handle_5,46440,handle_5,/data/dyj/zts/clean_data/v20260520/data520/46440/handle_5/trajectory.json,/data/dyj/zts/pull-push/assets/gapartnet_example/46440,1
+12583_handle_1,12583,handle_1,/data/dyj/zts/clean_data/v20260520/datanew/12583/handle_1/trajectory.json,/data/dyj/zts/pull-push/assets/gapartnet_example/12583,1
+48513_handle_2,48513,handle_2,/data/dyj/zts/clean_data/v20260520/datanew/48513/handle_2/trajectory.json,/data/dyj/zts/pull-push/assets/gapartnet_example/48513,1
